@@ -56,10 +56,9 @@ def gamma_correct(img, gamma):
     gamma < 1 осветляет тени, gamma > 1 затемняет. Таблицу считаем сами (NumPy),
     применяем индексацией — cv2.LUT допустим, но не обязателен.
     """
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 2–3 строки: таблица lut формы (256,) uint8 по формуле, затем lut[img]
-    raise NotImplementedError("TODO 1")
-    # ───────────────────────────────────────────────────────────
+    inv_gamma = np.arange(256, dtype=np.float32)
+    lut = as_uint8(255.0 * (inv_gamma / 255.0) ** gamma)
+    return lut[img]
 
 
 def white_balance(img, method="grey-world", percentile=99.0):
@@ -69,10 +68,17 @@ def white_balance(img, method="grey-world", percentile=99.0):
     white-patch: самое яркое (percentile-й процентиль канала) — белое → усиление = 255 / процентиль.
     """
     x = img.astype(np.float32)
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 6–8 строк: средние или процентили по каналам → gains (3,) → x * gains → as_uint8
-    raise NotImplementedError("TODO 2")
-    # ───────────────────────────────────────────────────────────
+    if method == "grey-world":
+        means = x.mean(axis=(0, 1))
+        mean_all = means.mean()
+        gains = np.where(means > 0, mean_all / means, 1.0)
+    elif method == "white-patch":
+        pcts = np.percentile(x, percentile, axis=(0, 1))
+        gains = np.where(pcts > 0, 255.0 / pcts, 1.0)
+    else:
+        raise ValueError(f"Неизвестный метод баланса белого: {method}")
+    x_corrected = x * gains
+    return as_uint8(x_corrected), gains
 
 
 def equalize_lab(img):
@@ -84,10 +90,10 @@ def equalize_lab(img):
 
 def clahe_lab(img, clip=2.0, tiles=8):
     """CLAHE по каналу L пространства Lab — цвет не трогаем, только яркость."""
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 3–4 строки: BGR → Lab, cv2.createCLAHE(clip, (tiles, tiles)).apply на L, обратно в BGR
-    raise NotImplementedError("TODO 3")
-    # ───────────────────────────────────────────────────────────
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles))
+    lab[..., 0] = clahe.apply(lab[..., 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
 def channel_hist(img):
@@ -156,28 +162,98 @@ def hsv_box_from(bgr_pixels, margin=10, p=(1, 99)):
 
 def color_mask(bgr, lo, hi, open_k=5, close_k=9):
     """HSV-маска по границам (lo, hi) + открытие/закрытие; lo[0] > hi[0] — красный через 179 (занятие 3)."""
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 8–10 строк: cvtColor → inRange (две маски и bitwise_or для красного) → MORPH_OPEN → MORPH_CLOSE
-    raise NotImplementedError("TODO 4")
-    # ───────────────────────────────────────────────────────────
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    if lo[0] > hi[0]:
+        lo1 = (lo[0], lo[1], lo[2])
+        hi1 = (179, hi[1], hi[2])
+        mask1 = cv2.inRange(hsv, np.array(lo1), np.array(hi1))
+        
+        lo2 = (0, lo[1], lo[2])
+        hi2 = (hi[0], hi[1], hi[2])
+        mask2 = cv2.inRange(hsv, np.array(lo2), np.array(hi2))
+        
+        mask = cv2.bitwise_or(mask1, mask2)
+    else:
+        mask = cv2.inRange(hsv, np.array(lo), np.array(hi))
+        
+    if open_k > 0:
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+        
+    if close_k > 0:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
+        
+    return mask
 
 
 def largest_component(mask, min_area=200):
     """Маска крупнейшей компоненты (uint8 0/255) и её статистика; None — если компонент нет или она мала."""
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 6–8 строк: connectedComponentsWithStats; пропустить фон (строка 0); argmax по площади; min_area
-    raise NotImplementedError("TODO 5")
-    # ───────────────────────────────────────────────────────────
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    
+    if num_labels <= 1:
+        return None
+        
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    max_idx_relative = np.argmax(areas)
+    max_label = max_idx_relative + 1
+    max_area = areas[max_idx_relative]
+    
+    if max_area < min_area:
+        return None
+        
+    comp_mask = as_uint8((labels == max_label) * 255)
+    
+    stat_dict = {
+        "x": int(stats[max_label, cv2.CC_STAT_LEFT]),
+        "y": int(stats[max_label, cv2.CC_STAT_TOP]),
+        "w": int(stats[max_label, cv2.CC_STAT_WIDTH]),
+        "h": int(stats[max_label, cv2.CC_STAT_HEIGHT]),
+        "area": int(max_area),
+        "components": 1,
+        "centroid": (round(float(centroids[max_label][0]), 1), round(float(centroids[max_label][1]), 1))
+    }
+    
+    return comp_mask, stat_dict
 
 
 def chroma_key(img, bg, lo, hi, open_k=5, close_k=9, feather=2.0):
     """Объект по цвету → на новый фон. Возвращает (композит, маска объекта, статистика)."""
     h, w = img.shape[:2]
     bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_AREA if bg.shape[0] > h else cv2.INTER_LINEAR)
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 6–9 строк: color_mask → largest_component (None → ошибка); альфа = маска/255 (GaussianBlur σ = feather для мягкого края); композит img·α + bg·(1 − α)
-    raise NotImplementedError("TODO 6")
-    # ───────────────────────────────────────────────────────────
+    
+    mask = color_mask(img, lo, hi, open_k, close_k)
+    
+    res = largest_component(mask)
+    if res is None:
+        raise ValueError("На маске не найдено ни одного компонента с площадью выше минимальной.")
+        
+    comp_mask, stats = res
+    
+    mask_float = 255.0 - comp_mask.astype(np.float32)  # инверсия: выделяем всё, КРОМЕ фона
+    if feather > 0:
+        ksize = int(np.ceil(feather * 3) * 2 + 1)
+        if ksize % 2 == 0: 
+            ksize += 1
+        mask_blur = cv2.GaussianBlur(mask_float, (ksize, ksize), feather)
+    else:
+        mask_blur = mask_float
+        
+    alpha = mask_blur / 255.0
+    alpha = np.expand_dims(alpha, axis=2)
+    
+    composite_float = img.astype(np.float32) * alpha + bg.astype(np.float32) * (1.0 - alpha)
+    composite = as_uint8(composite_float)
+    
+    stats["mask_pct"] = round(100.0 * (comp_mask > 0).mean(), 2)
+    
+    contours, hierarchy = cv2.findContours(comp_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    holes = 0
+    if hierarchy is not None:
+        holes = sum(1 for h in hierarchy[0] if h[3] != -1)
+    stats["holes"] = holes
+    
+    return composite, comp_mask, stats
 
 
 # ---------------------------------------------------------------- 3. геометрия ---
@@ -186,10 +262,21 @@ def chroma_key(img, bg, lo, hi, open_k=5, close_k=9, feather=2.0):
 def rotate_keep_all(img, deg, border=(255, 255, 255)):
     """Поворот на deg градусов вокруг центра с холстом по повёрнутым углам — ни один пиксель не отрезан."""
     h, w = img.shape[:2]
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 6–8 строк: getRotationMatrix2D; nw, nh = w·|cos| + h·|sin|, w·|sin| + h·|cos|; сдвиг M[:, 2] на разницу центров; warpAffine (nw, nh)
-    raise NotImplementedError("TODO 7")
-    # ───────────────────────────────────────────────────────────
+    cx, cy = w / 2.0, h / 2.0
+    
+    M = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+    
+    rad = np.deg2rad(deg)
+    cos = np.abs(np.cos(rad))
+    sin = np.abs(np.sin(rad))
+    nw = int(np.round(w * cos + h * sin))
+    nh = int(np.round(w * sin + h * cos))
+    
+    M[0, 2] += (nw / 2.0) - cx
+    M[1, 2] += (nh / 2.0) - cy
+    
+    return cv2.warpAffine(img, M, (nw, nh), flags=cv2.INTER_LINEAR, 
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=border)
 
 
 def resize_aa(img, scale, method="area"):
@@ -201,10 +288,20 @@ def resize_aa(img, scale, method="area"):
     """
     h, w = img.shape[:2]
     size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 6–9 строк: scale ≥ 1 → INTER_CUBIC; иначе по method: INTER_AREA / GaussianBlur(σ = 0.4 / scale) + INTER_LINEAR / INTER_LINEAR
-    raise NotImplementedError("TODO 8")
-    # ───────────────────────────────────────────────────────────
+    
+    if scale >= 1.0:
+        return cv2.resize(img, size, interpolation=cv2.INTER_CUBIC)
+    
+    if method == "area":
+        return cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+    elif method == "blur":
+        sigma = 0.4 / scale
+        img_blur = cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        return cv2.resize(img_blur, size, interpolation=cv2.INTER_LINEAR)
+    elif method == "naive":
+        return cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
+    else:
+        raise ValueError(f"Неизвестный метод интерполяции: {method}")
 
 
 def lanczos_reference(img, scale):
@@ -223,23 +320,58 @@ def psnr(a, b):
 
 def order_corners(pts):
     """Четыре точки в любом порядке → float32 (4, 2) в порядке tl, tr, br, bl (занятие 4)."""
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 3–4 строки: суммы x + y (tl — минимум, br — максимум), разности y − x (tr — минимум, bl — максимум)
-    raise NotImplementedError("TODO 9")
-    # ───────────────────────────────────────────────────────────
+    pts = np.array(pts, dtype=np.float32).reshape(4, 2)
+    res = np.zeros((4, 2), dtype=np.float32)
+    
+    s = pts.sum(axis=1)
+    res[0] = pts[np.argmin(s)]
+    res[2] = pts[np.argmax(s)]
+    
+    d = pts[:, 1] - pts[:, 0]
+    res[1] = pts[np.argmin(d)]
+    res[3] = pts[np.argmax(d)]
+    
+    return res
 
 
 def rectify(img, corners, size=None, aspect=None):
     """Четыре угла → фронтальный вид и H (занятие 4): размер из size / aspect (W / H) / длин сторон в кадре."""
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 8–11 строк: order_corners; W = max(верх, низ); H = W / aspect или max(лево, право); dst; getPerspectiveTransform; warpPerspective (W, H)
-    raise NotImplementedError("TODO 10")
-    # ───────────────────────────────────────────────────────────
+    c = order_corners(corners)
+    tl, tr, br, bl = c[0], c[1], c[2], c[3]
+    
+    if size is not None:
+        W, H = size
+    else:
+        w_top = np.linalg.norm(tr - tl)
+        w_bot = np.linalg.norm(br - bl)
+        W = int(np.round(max(w_top, w_bot)))
+        
+        if aspect is not None:
+            H = int(np.round(W / aspect))
+        else:
+            h_left = np.linalg.norm(bl - tl)
+            h_right = np.linalg.norm(br - tr)
+            H = int(np.round(max(h_left, h_right)))
+            
+    W = max(1, W)
+    H = max(1, H)
+    
+    dst = np.array([
+        [0, 0],
+        [W - 1, 0],
+        [W - 1, H - 1],
+        [0, H - 1]
+    ], dtype=np.float32)
+    
+    H_mat = cv2.getPerspectiveTransform(c, dst)
+    front = cv2.warpPerspective(img, H_mat, (W, H), flags=cv2.INTER_LINEAR)
+    
+    return front, H_mat
 
 
 def pick_corners(img, title="4 klika po uglam, Enter - gotovo, r - zanovo"):
     """Окно OpenCV: четыре клика по углам → float32 (4, 2) в координатах кадра (только локально)."""
-    pts, scale = [], min(1.0, 1200.0 / img.shape[1])
+    pts, scale = [], min(1.0, 600.0 / img.shape[1])
 
     def on_click(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 4:
@@ -272,10 +404,44 @@ def contact_sheet(images, captions, cols=None, cell=(320, 240), pad=8, caption_h
     rows = int(np.ceil(n / cols))
     cw, ch = cell
     sheet = np.full((rows * (ch + caption_h + pad) + pad, cols * (cw + pad) + pad, 3), 255, np.uint8)
-    # ───────────────────────── ВАШ КОД ─────────────────────────
-    # 8–12 строк: для каждого кадра — масштаб min(cw/w, ch/h), resize (INTER_AREA при уменьшении), положить по центру ячейки срезом, cv2.putText подпись под ячейкой
-    raise NotImplementedError("TODO 11")
-    # ───────────────────────────────────────────────────────────
+    
+    for idx, (im, cap) in enumerate(zip(images, captions)):
+        r = idx // cols
+        c = idx % cols
+        
+        im_h, im_w = im.shape[:2]
+        
+        if im.ndim == 2:
+            im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
+            
+        scale = min(cw / im_w, ch / im_h)
+        
+        nw = max(1, int(round(im_w * scale)))
+        nh = max(1, int(round(im_h * scale)))
+        
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        im_resized = cv2.resize(im, (nw, nh), interpolation=interp)
+        
+        cell_x = pad + c * (cw + pad)
+        cell_y = pad + r * (ch + caption_h + pad)
+        
+        dx = (cw - nw) // 2
+        dy = (ch - nh) // 2
+        
+        sheet[cell_y + dy : cell_y + dy + nh, cell_x + dx : cell_x + dx + nw] = im_resized
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.4
+        thickness = 1
+        
+        (text_w, text_h), _ = cv2.getTextSize(cap, font, font_scale, thickness)
+        
+        text_x = cell_x + max(0, (cw - text_w) // 2)
+        text_y = cell_y + ch + 12 + (caption_h - 12) // 2
+        
+        cv2.putText(sheet, cap, (text_x, text_y), font, font_scale, (0, 0, 0), thickness, lineType=cv2.LINE_AA)
+        
+    return sheet
 
 
 # --------------------------------------------------------------------- CLI ---
