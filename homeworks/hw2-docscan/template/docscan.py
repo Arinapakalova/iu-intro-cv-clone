@@ -91,7 +91,9 @@ def estimate_noise(gray):
     g = gray.astype(np.float32)
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: cv2.filter2D(g, -1, NOISE_KERNEL) без крайних строк и столбцов → median(|r|) / 0.6745 / 6
-    raise NotImplementedError("TODO 1")
+    res = cv2.filter2D(g, -1, NOISE_KERNEL)[1:-1, 1:-1]
+    sigma = np.median(np.abs(res)) / 0.6745 / 6.0
+    return float(sigma)
     # ───────────────────────────────────────────────────────────
 
 
@@ -103,7 +105,9 @@ def denoise(gray, noise_sigma, target=1.0, lo=1.0, hi=3.0):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: sigma_f = noise_sigma / (2·sqrt(π)·target), обрезать np.clip в [lo, hi]; cv2.GaussianBlur(gray, (0, 0), sigma_f)
-    raise NotImplementedError("TODO 2")
+    sigma_f = np.clip(noise_sigma / (2 * np.sqrt(np.pi) * target), lo, hi)
+    res = cv2.GaussianBlur(gray, (0, 0), sigma_f)
+    return res, sigma_f
     # ───────────────────────────────────────────────────────────
 
 
@@ -133,7 +137,11 @@ def auto_canny(gray, k=0.33):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: m = np.median(gray); lo и hi — целые, обрезанные в [0, 255]; cv2.Canny(gray, lo, hi, L2gradient=True)
-    raise NotImplementedError("TODO 3")
+    m = np.median(gray)
+    lo = int(np.clip((1.0 - k) * m, 0, 255))
+    hi = int(np.clip((1.0 + k) * m, 0, 255))
+    res = cv2.Canny(gray, lo, hi, L2gradient=True)
+    return res, (lo, hi)
     # ───────────────────────────────────────────────────────────
 
 
@@ -149,7 +157,35 @@ def quad_from_contours(edges, min_area=0.10, eps=0.02, close_k=5, top=5):
     h, w = edges.shape[:2]
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 8–10 строк: morphologyEx(MORPH_CLOSE) ядром close_k; findContours(RETR_LIST, CHAIN_APPROX_SIMPLE)[-2]; сортировка по contourArea; approxPolyDP; len == 4, isContourConvex, площадь
-    raise NotImplementedError("TODO 4")
+    # 1. Морфологическое закрытие (CLOSE) для замыкания контуров
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    
+    # 2. Поиск всех контуров (RETR_LIST обеспечивает совместимость версий OpenCV через [-2])
+    contours = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    
+    # 3. Сортировка контуров по убыванию площади и выбор топ-N крупнейших
+    sorted_cnts = sorted(contours, key=cv2.contourArea, reverse=True)[:top]
+    
+    frame_area = h * w
+    
+    # 4. Поиск первого подходящего выпуклого четырехугольника
+    for cnt in sorted_cnts:
+        area = cv2.contourArea(cnt)
+        if area < min_area * frame_area:
+            continue  # Пропускаем слишком мелкие контуры
+            
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, eps * peri, True)
+        
+        # Проверяем, что получилось ровно 4 угла и контур выпуклый
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            # Преобразуем в массив float32 (4, 2)
+            quad = approx.reshape(4, 2).astype(np.float32)
+            return quad
+            
+    return None
+
     # ───────────────────────────────────────────────────────────
 
 
@@ -180,7 +216,17 @@ def line_through(p, q):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: np.cross((x1, y1, 1), (x2, y2, 1)); поделить на hypot(a, b); если hypot ≈ 0 — None
-    raise NotImplementedError("TODO 5")
+    # Извлекаем координаты из точек p и q
+    line = np.cross([p[0], p[1], 1], [q[0], q[1], 1])
+    
+    # Считаем длину вектора нормали
+    h = np.hypot(line[0], line[1])
+    
+    # Если точки совпали, длина нормали будет близка к 0
+    if h < 1e-9:
+        return None
+        
+    return line / h
     # ───────────────────────────────────────────────────────────
 
 
@@ -188,7 +234,10 @@ def intersect(l1, l2):
     """Точка пересечения двух прямых (x, y) — векторное произведение (L4); параллельные → None."""
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: x = np.cross(l1, l2); если |x[2]| < 1e-9 — None; иначе x[:2] / x[2]
-    raise NotImplementedError("TODO 6")
+    x = np.cross(l1, l2)
+    if abs(x[2]) < 1e-9:
+        return None
+    return x[:2] / x[2]
     # ───────────────────────────────────────────────────────────
 
 
@@ -217,7 +266,47 @@ def ransac_line(pts, thr=2.0, iters=200, rng=None):
         return None, None
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 10–12 строк: цикл iters; i, j = rng.integers(0, n, 2); line_through (None — пропустить); point_line_dist < thr; запомнить лучшую маску; fit_line(pts[best]); пересчитать маску
-    raise NotImplementedError("TODO 7")
+    best_inliers_mask = None
+    max_inliers_count = -1
+
+    for _ in range(iters):
+        # 1. Выбираем два случайных уникальных индекса точек
+        idx1, idx2 = rng.choice(n, size=2, replace=False)
+        
+        # 2. Строим прямую через выбранные точки
+        line = line_through(pts[idx1], pts[idx2])
+        if line is None:
+            continue
+            
+        # 3. Считаем расстояния от всех точек до прямой
+        # Переводим точки в однородные координаты (N, 3), добавляя столбец единиц
+        pts_homo = np.hstack([pts, np.ones((n, 1))])
+        dists = np.abs(pts_homo @ line)
+        
+        # 4. Определяем инлаеры для текущей гипотезы
+        inliers_mask = dists < thr
+        inliers_count = np.sum(inliers_mask)
+        
+        # 5. Запоминаем лучшую попытку
+        if inliers_count > max_inliers_count:
+            max_inliers_count = inliers_count
+            best_inliers_mask = inliers_mask
+
+    # Если не удалось найти ни одной валидной прямой
+    if best_inliers_mask is None or max_inliers_count < 2:
+        return None, None
+
+    # 6. Финальное уточнение (fit_line) по всем найденным инлаерам
+    best_pts = pts[best_inliers_mask]
+    refined_line = fit_line(best_pts)
+    
+    # Пересчитываем маску инлаеров для уточненной прямой
+    pts_homo = np.hstack([pts, np.ones((n, 1))])
+    final_dists = np.abs(pts_homo @ refined_line)
+    final_inliers_mask = final_dists < thr
+
+    return refined_line, final_inliers_mask
+
     # ───────────────────────────────────────────────────────────
 
 
@@ -229,7 +318,28 @@ def dominant_lines(pts, n_lines=4, thr=2.0, iters=200, min_inliers=25, clear=3.0
     rng = rng or np.random.default_rng(0)
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 7–9 строк: цикл до n_lines; ransac_line на оставшихся; мало инлаеров — стоп; запомнить; оставить точки дальше clear · thr от найденной прямой
-    raise NotImplementedError("TODO 8")
+    lines = []
+    current_pts = np.array(pts, copy=True)
+
+    for _ in range(n_lines):
+        # 1. Запускаем RANSAC на оставшихся точках
+        line, inliers_mask = ransac_line(current_pts, thr=thr, iters=iters, rng=rng)
+        
+        # 2. Если прямая не найдена или набрала меньше min_inliers — останавливаемся
+        if line is None or np.sum(inliers_mask) < min_inliers:
+            break
+            
+        lines.append(line)
+        
+        # 3. Считаем расстояния от всех текущих точек до найденной прямой
+        pts_homo = np.hstack([current_pts, np.ones((len(current_pts), 1))])
+        dists = np.abs(pts_homo @ line)
+        
+        # 4. Оставляем только те точки, которые находятся ДАЛЬШЕ, чем clear * thr
+        current_pts = current_pts[dists >= (clear * thr)]
+        
+    return lines
+
     # ───────────────────────────────────────────────────────────
 
 
@@ -252,7 +362,64 @@ def quad_from_lines(lines, shape, margin=0.05, min_area=0.10):
     h, w = shape[:2]
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 12–15 строк: itertools.combinations(range(len(lines)), 4); три разбиения на пары; четыре intersect; все в кадре ± margin; order_corners; is_convex_quad; cv2.contourArea ≥ min_area·h·w
-    raise NotImplementedError("TODO 9")
+    frame_area = h * w
+    margin_w = w * margin
+    margin_h = h * margin
+    
+    # Расширенные границы кадра с учетом margin
+    x_min, x_max = -margin_w, w + margin_w
+    y_min, y_max = -margin_h, h + margin_h
+
+    # 1. Перебираем все четверки прямых в порядке убывания силы (по индексам)
+    for idxs in itertools.combinations(range(len(lines)), 4):
+        quad_lines = [lines[i] for i in idxs]
+        
+        # 2. Три способа разбить 4 прямые на 2 пары противоположных сторон:
+        # Способ A: (0,1) и (2,3) | Способ B: (0,2) и (1,3) | Способ C: (0,3) and (1,2)
+        pairings = [
+            ((0, 1), (2, 3)),
+            ((0, 2), (1, 3)),
+            ((0, 3), (1, 2))
+        ]
+        
+        for p1, p2 in pairings:
+            # Прямые в паре 1 и паре 2
+            l1, l2 = quad_lines[p1[0]], quad_lines[p1[1]]
+            l3, l4 = quad_lines[p2[0]], quad_lines[p2[1]]
+            
+            # Пересекаем прямые из разных пар (смежные стороны), чтобы получить 4 угла
+            pts = [
+                intersect(l1, l3),
+                intersect(l1, l4),
+                intersect(l2, l4),
+                intersect(l2, l3)
+            ]
+            
+            # Если хотя бы одна пара прямых параллельна (нет пересечения), пропускаем
+            if any(pt is None for pt in pts):
+                continue
+                
+            # 3. Проверяем, что все 4 точки лежат внутри кадра с учетом margin
+            inside = True
+            for pt in pts:
+                x, y = pt[0], pt[1]
+                if not (x_min <= x <= x_max and y_min <= y <= y_max):
+                    inside = False
+                    break
+            if not inside:
+                continue
+                
+            # 4. Упорядочиваем углы (например, по часовой стрелке) для проверки геометрии
+            quad = order_corners(np.array(pts, dtype=np.float32))
+            
+            # 5. Проверяем выпуклость четырехугольника и его площадь
+            if is_convex_quad(quad):
+                area = cv2.contourArea(quad.reshape(4, 1, 2))
+                if area >= min_area * frame_area:
+                    return quad
+
+    return None
+
     # ───────────────────────────────────────────────────────────
 
 
@@ -276,7 +443,20 @@ def order_corners(pts):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 3–4 строки: центроид; np.arctan2(dy, dx) → argsort (ось y вниз: по возрастанию угла — по часовой); np.roll так, чтобы первым стал argmin(x + y)
-    raise NotImplementedError("TODO 10")
+    pts = np.asarray(pts, dtype=np.float32)
+    # 1. Находим центроид (среднее арифметическое всех четырех точек)
+    cx, cy = np.mean(pts, axis=0)
+    
+    # 2. Вычисляем углы точек относительно центроида
+    # Так как ось Y направлена вниз, сортировка по возрастанию arctan2 даст обход по часовой стрелке
+    angles = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
+    pts_sorted = pts[np.argsort(angles)]
+    
+    # 3. Находим индекс точки с минимальной суммой координат (Top-Left угол)
+    tl_idx = np.argmin(pts_sorted[:, 0] + pts_sorted[:, 1])
+    
+    # 4. Сдвигаем массив так, чтобы эта точка стала первой
+    return np.roll(pts_sorted, -tl_idx, axis=0).astype(np.float32)
     # ───────────────────────────────────────────────────────────
 
 
@@ -287,7 +467,44 @@ def rectify(img, corners, size=None, aspect=None):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 9–12 строк: order_corners; длины четырёх сторон; W и H по правилу выше; dst = углы (0, 0) … (W − 1, H − 1); getPerspectiveTransform; warpPerspective (W, H), BORDER_REPLICATE
-    raise NotImplementedError("TODO 11")
+        # 1. Принудительно упорядочиваем углы: [tl, tr, br, bl]
+    pts = order_corners(corners)
+    tl, tr, br, bl = pts[0], pts[1], pts[2], pts[3]
+    
+    # 2. Если размер (W, H) не задан, рассчитываем его динамически
+    if size is not None:
+        W, H = size
+    else:
+        # Вычисляем евклидовы длины всех четырех сторон исходного четырехугольника
+        top = np.linalg.norm(tr - tl)
+        bottom = np.linalg.norm(br - bl)
+        left = np.linalg.norm(bl - tl)
+        right = np.linalg.norm(br - tr)
+        
+        if aspect is not None:
+            # Правило сохранения масштаба: ни одна сторона не должна уменьшаться
+            W = int(np.ceil(max(top, bottom, aspect * left, aspect * right)))
+            H = int(np.ceil(W / aspect))
+        else:
+            # Если нет ни размера, ни аспекта, берем максимумы сторон
+            W = int(np.ceil(max(top, bottom)))
+            H = int(np.ceil(max(left, right)))
+
+    # 3. Задаем опорные точки для целевого (фронтального) прямоугольника
+    dst_pts = np.array([
+        [0, 0],
+        [W - 1, 0],
+        [W - 1, H - 1],
+        [0, H - 1]
+    ], dtype=np.float32)
+    
+    # 4. Вычисляем матрицу гомографии H (3х3)
+    M = cv2.getPerspectiveTransform(pts, dst_pts)
+    
+    # 5. Проецируем изображение с репликацией краевых пикселей
+    rectified = cv2.warpPerspective(img, M, (W, H), borderMode=cv2.BORDER_REPLICATE)
+    
+    return rectified, H
     # ───────────────────────────────────────────────────────────
 
 
@@ -297,7 +514,27 @@ def quad_iou(q1, q2, shape):
         return 0.0
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 5–6 строк: две маски np.zeros(shape[:2], uint8); cv2.fillConvexPoly углами order_corners (int32, округлить); IoU = пересечение / объединение
-    raise NotImplementedError("TODO 12")
+        # 1. Создаем пустые маски для обоих четырехугольников
+    mask1 = np.zeros(shape[:2], dtype=np.uint8)
+    mask2 = np.zeros(shape[:2], dtype=np.uint8)
+    
+    # 2. Упорядочиваем углы, округляем и приводим к типу int32 (требование fillConvexPoly)
+    pts1 = np.int32(np.round(order_corners(q1)))
+    pts2 = np.int32(np.round(order_corners(q2)))
+    
+    # 3. Заливаем многоугольники на масках единицами
+    cv2.fillConvexPoly(mask1, pts1, 1)
+    cv2.fillConvexPoly(mask2, pts2, 1)
+    
+    # 4. Считаем пересечение (логическое И) и объединение (логическое ИЛИ)
+    intersection = np.sum((mask1 & mask2) > 0)
+    union = np.sum((mask1 | mask2) > 0)
+    
+    # Защита от деления на ноль, если оба контура оказались пустыми
+    if union == 0:
+        return 0.0
+        
+    return float(intersection) / union
     # ───────────────────────────────────────────────────────────
 
 
@@ -312,7 +549,10 @@ def remove_shadows(gray, k=51):
     """
     # ───────────────────────── ВАШ КОД ─────────────────────────
     # 2–3 строки: bg = cv2.medianBlur(gray, k); деление во float32 (фон не меньше 1); as_uint8(255 · gray / bg)
-    raise NotImplementedError("TODO 13")
+    bg = cv2.medianBlur(gray, k)
+    bg = np.maximum(bg, 1.0)  # Защита от деления на ноль (фон не меньше 1)
+    res = 255.0 * gray.astype(np.float32) / bg.astype(np.float32)
+    return np.clip(res, 0, 255).astype(np.uint8)
     # ───────────────────────────────────────────────────────────
 
 
@@ -475,10 +715,14 @@ def evaluate(paths, ann, methods=("contour", "hough", "auto"), iou_ok=0.9, seeds
     summary = {}
     pos, neg = [r for r in rows if r["sheet"]], [r for r in rows if not r["sheet"]]
     for m in methods:
-        summary[m] = {"sheets": len(pos), "found_iou_ok": sum(r[m + "_iou"] >= iou_ok for r in pos),
-                      "mean_iou": round(float(np.mean([r[m + "_iou"] for r in pos])), 3) if pos else None,
-                      "no_sheet": len(neg), "rejected": sum(not r[m + "_found"] for r in neg),
-                      "mean_ms": round(float(np.mean([r[m + "_ms"] for r in rows])), 1) if rows else None}
+        summary[m] = {
+            "sheets": int(len(pos)),
+            "found_iou_ok": int(sum(r[m + "_iou"] >= iou_ok for r in pos)),
+            "mean_iou": round(float(np.mean([r[m + "_iou"] for r in pos])), 3) if pos else None,
+            "no_sheet": int(len(neg)),
+            "rejected": int(sum(not r[m + "_found"] for r in neg)),
+            "mean_ms": round(float(np.mean([r[m + "_ms"] for r in rows])), 1) if rows else None
+        }
     return rows, summary
 
 
